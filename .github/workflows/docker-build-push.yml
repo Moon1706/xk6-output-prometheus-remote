@@ -1,6 +1,5 @@
 name: Build and push Docker
 
-name: CI
 on:
   workflow_dispatch:
   push:
