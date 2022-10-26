@@ -10,8 +10,8 @@ RUN CGO_ENABLED=0 xk6 build \
 
 # Create image for running k6 with output for Prometheus Remote Write
 FROM alpine:3.16
-RUN apk add --no-cache ca-certificates gettext perl-utils \
-    && adduser -D -u 12345 -g 12345 k6
+RUN apk add --no-cache ca-certificates gettext perl-utils bash \
+    && adduser -D -u 12345 -g 12345 --shell /bin/bash k6
 COPY --from=builder /tmp/k6 /usr/bin/k6
 
 USER 12345
