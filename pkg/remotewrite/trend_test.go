@@ -2,112 +2,84 @@ package remotewrite
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	prompb "go.buf.build/grpc/go/prometheus/prometheus"
 	"go.k6.io/k6/metrics"
 )
 
-// check that ad-hoc optimization doesn't produce wrong values
-func TestTrendSinkAdd(t *testing.T) {
+func TestExtendedTrendSinkMapPrompb(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		current  trendSink
-		s        metrics.Sample
-		expected trendSink
-	}{
-		{
-			current: trendSink{},
-			s:       metrics.Sample{Value: 2},
-			expected: trendSink{
-				Values: []float64{2},
-				Count:  1,
-				Min:    2,
-				Max:    2,
-				Sum:    2,
-				Avg:    2,
-				Med:    2,
+	now := time.Now()
+	r := metrics.NewRegistry()
+
+	sample := metrics.Sample{
+		TimeSeries: metrics.TimeSeries{
+			Metric: &metrics.Metric{
+				Name: "test",
+				Type: metrics.Trend,
 			},
+			Tags: r.RootTagSet(),
 		},
-		{
-			current: trendSink{
-				Values: []float64{1, 2, 3, 4, 7, 8}, // expected to be sorted
-				Count:  6,
-				Min:    1,
-				Max:    8,
-				Sum:    25,
-			},
-			s: metrics.Sample{Value: 12.3},
-			expected: trendSink{
-				Values: []float64{1, 2, 3, 4, 7, 8, 12.3},
-				Count:  7,
-				Min:    1,
-				Max:    12.3,
-				Sum:    37.3,
-				Avg:    37.3 / 7,
-				Med:    4,
-			},
-		},
+		Value: 1.0,
+		Time:  now,
 	}
 
-	for _, testCase := range testCases {
-		testCase.current.Add(testCase.s)
-		sink := testCase.current
-
-		k6sink := &metrics.TrendSink{}
-		for _, v := range sink.Values {
-			k6sink.Add(metrics.Sample{Value: v})
-		}
-		// the k6 metrics.TrendSink and the modified version in this repo
-		// must return the same values
-		assert.Equal(t, sink.Format(0), k6sink.Format(0))
-
-		require.Equal(t, testCase.expected.Values, sink.Values)
-		assert.Equal(t, testCase.expected.Count, sink.Count)
-		assert.Equal(t, testCase.expected.Min, sink.Min)
-		assert.Equal(t, testCase.expected.Max, sink.Max)
-		assert.Equal(t, testCase.expected.Sum, sink.Sum)
-		assert.Equal(t, testCase.expected.Avg, sink.Avg)
-		assert.Equal(t, testCase.expected.Med, sink.Med)
+	expected := []*prompb.TimeSeries{
+		buildTimeSeries("k6_test_count", 1.0, now),
+		buildTimeSeries("k6_test_sum", 1.0, now),
+		buildTimeSeries("k6_test_min", 1.0, now),
+		buildTimeSeries("k6_test_max", 1.0, now),
+		buildTimeSeries("k6_test_avg", 1.0, now),
+		buildTimeSeries("k6_test_med", 1.0, now),
+		buildTimeSeries("k6_test_p90", 1.0, now),
+		buildTimeSeries("k6_test_p95", 1.0, now),
 	}
+
+	st := newExtendedTrendSink()
+	st.Add(sample)
+	require.Equal(t, st.Count, uint64(1))
+
+	ts := st.MapPrompb(sample.TimeSeries, sample.Time)
+	require.Len(t, ts, 8)
+	assertTimeSeriesEqual(t, expected, ts)
 }
 
-// TODO: update and recheck the results
+func TestTrendAsGaugesFindIxName(t *testing.T) {
+	t.Parallel()
 
-// func BenchmarkTrendAdd(b *testing.B) {
-// benchF := []func(b *testing.B, start metrics.Metric){
-// func(b *testing.B, m metrics.Metric) {
-// b.ResetTimer()
-// rand.Seed(time.Now().Unix())
-
-//for i := 0; i < b.N; i++ {
-//trendAdd(&m, metrics.Sample{Value: rand.Float64() * 1000})
-//sink := m.Sink.(*metrics.TrendSink)
-//p(sink, 0.90)
-//p(sink, 0.95)
-//}
-//},
-//func(b *testing.B, start metrics.Metric) {
-//b.ResetTimer()
-//rand.Seed(time.Now().Unix())
-
-//for i := 0; i < b.N; i++ {
-//start.Sink.Add(metrics.Sample{Value: rand.Float64() * 1000})
-//start.Sink.Format(0)
-//}
-//},
-//}
-
-//start := metrics.Metric{
-//Type: metrics.Trend,
-//Sink: &metrics.TrendSink{},
-//}
-
-//b.Run("trendAdd", func(b *testing.B) {
-//benchF[0](b, start)
-//})
-//b.Run("TrendSink.Add", func(b *testing.B) {
-//benchF[1](b, start)
-//})
-//}
+	cases := []struct {
+		// they have to be sorted
+		labels   []string
+		expIndex uint16
+	}{
+		{
+			labels:   []string{"tag1", "tag2"},
+			expIndex: 0,
+		},
+		{
+			labels:   []string{"2", "__name__"},
+			expIndex: 1,
+		},
+		{
+			labels:   []string{"__name__", "tag1", "__name__"},
+			expIndex: 0,
+		},
+		{
+			labels:   []string{"1", "__name__", "__name__1"},
+			expIndex: 1,
+		},
+	}
+	for _, tc := range cases {
+		lbls := make([]*prompb.Label, 0, len(tc.labels))
+		for _, l := range tc.labels {
+			lbls = append(lbls, &prompb.Label{Name: l})
+		}
+		tg := trendAsGauges{labels: lbls}
+		tg.CacheNameIndex()
+		assert.Equal(t, tc.expIndex, tg.ixname)
+	}
+}

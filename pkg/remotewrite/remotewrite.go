@@ -138,11 +138,8 @@ func (o *Output) convertToPbSeries(samplesContainers []metrics.SampleContainer) 
 			truncTime := sample.Time.Truncate(time.Millisecond)
 			swm, ok := o.tsdb[sample.TimeSeries]
 			if !ok {
-				swm = &seriesWithMeasure{
-					TimeSeries: sample.TimeSeries,
-					Measure:    sinkByType(sample.Metric.Type),
-					Latest:     truncTime,
-				}
+				swm = newSeriesWithMeasure(sample.TimeSeries)
+				swm.Latest = truncTime
 				o.tsdb[sample.TimeSeries] = swm
 				seen[sample.TimeSeries] = struct{}{}
 			} else {
@@ -198,20 +195,19 @@ type seriesWithMeasure struct {
 	// TODO: maybe add some caching for the mapping?
 }
 
+// TODO: unit test this
 func (swm seriesWithMeasure) MapPrompb() []*prompb.TimeSeries {
 	var newts []*prompb.TimeSeries
 
 	mapMonoSeries := func(s metrics.TimeSeries, t time.Time) prompb.TimeSeries {
 		return prompb.TimeSeries{
-			Labels: append(MapTagSet(swm.Tags), &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s", defaultMetricPrefix, swm.Metric.Name),
-			}),
+			Labels: MapSeries(s),
 			Samples: []*prompb.Sample{
 				{Timestamp: t.UnixMilli()},
 			},
 		}
 	}
+
 	switch swm.Metric.Type {
 	case metrics.Counter:
 		ts := mapMonoSeries(swm.TimeSeries, swm.Latest)
@@ -231,29 +227,42 @@ func (swm seriesWithMeasure) MapPrompb() []*prompb.TimeSeries {
 		newts = []*prompb.TimeSeries{&ts}
 
 	case metrics.Trend:
-		newts = MapTrend(
-			swm.TimeSeries, swm.Latest, swm.Measure.(*trendSink))
+		// TODO:
+		//	- Add a PrompbMapSinker interface
+		//    and implements it on all the sinks "extending" them.
+		//  - Call directly MapPrompb on Measure without any type assertion.
+		trend, ok := swm.Measure.(prompbMapper)
+		if !ok {
+			panic("Measure for Trend types must implement MapPromPb")
+		}
+		newts = trend.MapPrompb(swm.TimeSeries, swm.Latest)
 
 	default:
 		panic(fmt.Sprintf("Something is really off, as I cannot recognize the type of metric %s: `%s`", swm.Metric.Name, swm.Metric.Type))
 	}
-
 	return newts
 }
 
-func sinkByType(mt metrics.MetricType) metrics.Sink {
+type prompbMapper interface {
+	MapPrompb(series metrics.TimeSeries, t time.Time) []*prompb.TimeSeries
+}
+
+func newSeriesWithMeasure(series metrics.TimeSeries) *seriesWithMeasure {
 	var sink metrics.Sink
-	switch mt {
+	switch series.Metric.Type {
 	case metrics.Counter:
 		sink = &metrics.CounterSink{}
 	case metrics.Gauge:
 		sink = &metrics.GaugeSink{}
 	case metrics.Trend:
-		sink = &trendSink{}
+		sink = newExtendedTrendSink()
 	case metrics.Rate:
 		sink = &metrics.RateSink{}
 	default:
-		panic(fmt.Sprintf("metric type %q unsupported", mt.String()))
+		panic(fmt.Sprintf("metric type %q unsupported", series.Metric.Type.String()))
 	}
-	return sink
+	return &seriesWithMeasure{
+		TimeSeries: series,
+		Measure:    sink,
+	}
 }

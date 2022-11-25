@@ -2,13 +2,18 @@ package remotewrite
 
 import (
 	"fmt"
-	"time"
+	"sort"
 
 	"github.com/mstoykov/atlas"
 	prompb "go.buf.build/grpc/go/prometheus/prometheus"
 	"go.k6.io/k6/metrics"
 )
 
+const namelbl = "__name__"
+
+// MapTagSet converts a k6 tag set into
+// the equivalent set of Labels as expected from the
+// Prometheus' data model.
 func MapTagSet(t *metrics.TagSet) []*prompb.Label {
 	n := (*atlas.Node)(t)
 	if n.Len() < 1 {
@@ -23,121 +28,19 @@ func MapTagSet(t *metrics.TagSet) []*prompb.Label {
 	return labels
 }
 
-func MapSeries(ts metrics.TimeSeries) prompb.TimeSeries {
-	return prompb.TimeSeries{
-		Labels: append(MapTagSet(ts.Tags), &prompb.Label{
-			Name:  "__name__",
-			Value: fmt.Sprintf("%s%s", defaultMetricPrefix, ts.Metric.Name),
-		}),
-	}
-}
-
-func MapTrend(series metrics.TimeSeries, t time.Time, sink *trendSink) []*prompb.TimeSeries {
-	// Prometheus metric system does not support Trend so this mapping will
-	// store a counter for the number of reported values and gauges to keep
-	// track of aggregated values. Also store a sum of the values to allow
-	// the calculation of moving averages.
-	// TODO: when Prometheus implements support for sparse histograms, re-visit this implementation
-
-	labels := MapTagSet(series.Tags)
-	timestamp := t.UnixMilli()
-
-	return []*prompb.TimeSeries{
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_count", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     float64(sink.Count),
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_sum", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.Sum,
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_min", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.Min,
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_max", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.Max,
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_avg", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.Avg,
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_med", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.Med,
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_p90", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.P(0.9),
-					Timestamp: timestamp,
-				},
-			},
-		},
-		{
-			Labels: append(labels, &prompb.Label{
-				Name:  "__name__",
-				Value: fmt.Sprintf("%s%s_p95", defaultMetricPrefix, series.Metric.Name),
-			}),
-			Samples: []*prompb.Sample{
-				{
-					Value:     sink.P(0.95),
-					Timestamp: timestamp,
-				},
-			},
-		},
-	}
+// MapSeries converts a k6 time series into
+// the equivalent set of Labels (name+tags) as expected from the
+// Prometheus' data model.
+//
+// The labels are lexicographic sorted as required
+// from the Remote write's specification.
+func MapSeries(series metrics.TimeSeries) []*prompb.Label {
+	lbls := append(MapTagSet(series.Tags), &prompb.Label{
+		Name:  namelbl,
+		Value: fmt.Sprintf("%s%s", defaultMetricPrefix, series.Metric.Name),
+	})
+	sort.Slice(lbls, func(i int, j int) bool {
+		return lbls[i].Name < lbls[j].Name
+	})
+	return lbls
 }

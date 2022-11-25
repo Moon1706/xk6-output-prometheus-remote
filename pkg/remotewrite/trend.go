@@ -1,84 +1,109 @@
 package remotewrite
 
 import (
-	"math"
 	"sort"
 	"time"
 
+	prompb "go.buf.build/grpc/go/prometheus/prometheus"
 	"go.k6.io/k6/metrics"
 )
 
-// The following functions are an attempt to add ad-hoc optimization to TrendSink,
-// and are a partial copy-paste from k6/metrics.
-// TODO: re-write & refactor this once metrics refactoring progresses in k6.
-
-type trendSink struct {
-	Values   []float64
-	Count    uint64
-	Min, Max float64
-	Sum, Avg float64
-	Med      float64
+type extendedTrendSink struct {
+	*metrics.TrendSink
 }
 
-func (t *trendSink) IsEmpty() bool { return t.Count == 0 }
+func newExtendedTrendSink() *extendedTrendSink {
+	return &extendedTrendSink{
+		TrendSink: &metrics.TrendSink{},
+	}
+}
 
-func (t *trendSink) Add(s metrics.Sample) {
-	// insert into sorted array instead of sorting anew on each addition
-	index := sort.Search(len(t.Values), func(i int) bool {
-		return t.Values[i] > s.Value
+// MapPrompb converts a k6 time series and its relative
+// Sink into the equivalent TimeSeries model as defined from
+// the Remote write specification.
+func (sink *extendedTrendSink) MapPrompb(series metrics.TimeSeries, t time.Time) []*prompb.TimeSeries {
+	// Prometheus metric system does not support Trend so this mapping will
+	// store a counter for the number of reported values and gauges to keep
+	// track of aggregated values. Also store a sum of the values to allow
+	// the calculation of moving averages.
+	// TODO: when Prometheus implements support for sparse histograms, re-visit this implementation
+
+	tg := &trendAsGauges{
+		series:    make([]*prompb.TimeSeries, 0, 8),
+		labels:    MapSeries(series),
+		timestamp: t.UnixMilli(),
+	}
+	tg.CacheNameIndex()
+
+	tg.Append("count", float64(sink.Count))
+	tg.Append("sum", sink.Sum)
+	tg.Append("min", sink.Min)
+	tg.Append("max", sink.Max)
+	tg.Append("avg", sink.Avg)
+	tg.Append("med", sink.P(0.5))
+	tg.Append("p90", sink.P(0.9))
+	tg.Append("p95", sink.P(0.95))
+	return tg.series
+}
+
+type trendAsGauges struct {
+	// series is the slice of the converted TimeSeries.
+	series []*prompb.TimeSeries
+
+	// labels are the shared labels between all the Gauges.
+	labels []*prompb.Label
+
+	// timestamp is the shared timestamp in ms between all the Gauges.
+	timestamp int64
+
+	// ixname is the slice's index
+	// of the __name__ Label item.
+	//
+	// 16 bytes should be enough for the max length
+	// an higher value will probably generate
+	// serious issues in other places.
+	ixname uint16
+}
+
+func (tg *trendAsGauges) Append(suffix string, v float64) {
+	ts := &prompb.TimeSeries{
+		Labels:  make([]*prompb.Label, len(tg.labels)),
+		Samples: make([]*prompb.Sample, 1),
+	}
+	for i := 0; i < len(tg.labels); i++ {
+		ts.Labels[i] = &prompb.Label{
+			Name:  tg.labels[i].Name,
+			Value: tg.labels[i].Value,
+		}
+	}
+	ts.Labels[tg.ixname].Value += "_" + suffix
+
+	ts.Samples[0] = &prompb.Sample{
+		Timestamp: tg.timestamp,
+		Value:     v,
+	}
+	tg.series = append(tg.series, ts)
+}
+
+// CacheNameIndex finds the __name__ label's index
+// if it is different from the most common expected case
+// then it caches the value.
+// The labels slice is expected to be sorted.
+func (tg *trendAsGauges) CacheNameIndex() {
+	if tg.labels[0].Name == namelbl {
+		// ixname is expected to be the first in most of the cases
+		// the default value is already 0
+		return
+	}
+
+	// in the case __name__ is not the first
+	// then search for its position
+
+	i := sort.Search(len(tg.labels), func(i int) bool {
+		return tg.labels[i].Name == namelbl
 	})
-	t.Values = append(t.Values, 0)
-	copy(t.Values[index+1:], t.Values[index:])
-	t.Values[index] = s.Value
 
-	t.Count += 1
-	t.Sum += s.Value
-	t.Avg = t.Sum / float64(t.Count)
-
-	if s.Value > t.Max {
-		t.Max = s.Value
-	}
-	if s.Value < t.Min || t.Count == 1 {
-		t.Min = s.Value
-	}
-
-	if (t.Count & 0x01) == 0 {
-		t.Med = (t.Values[(t.Count/2)-1] + t.Values[(t.Count/2)]) / 2
-	} else {
-		t.Med = t.Values[t.Count/2]
-	}
-}
-
-func (t *trendSink) P(pct float64) float64 {
-	switch t.Count {
-	case 0:
-		return 0
-	case 1:
-		return t.Values[0]
-	default:
-		// If percentile falls on a value in Values slice, we return that value.
-		// If percentile does not fall on a value in Values slice, we calculate (linear interpolation)
-		// the value that would fall at percentile, given the values above and below that percentile.
-		i := pct * (float64(t.Count) - 1.0)
-		j := t.Values[int(math.Floor(i))]
-		k := t.Values[int(math.Ceil(i))]
-		f := i - math.Floor(i)
-		return j + (k-j)*f
-	}
-}
-
-func (t *trendSink) Calc() {
-	// added just for implementing the k6 metrics.Sink interface
-	// the values are already re-synced for every new addition
-}
-
-func (t *trendSink) Format(time.Duration) map[string]float64 {
-	return map[string]float64{
-		"min":   t.Min,
-		"max":   t.Max,
-		"avg":   t.Avg,
-		"med":   t.Med,
-		"p(90)": t.P(0.90),
-		"p(95)": t.P(0.95),
+	if i < len(tg.labels) && tg.labels[i].Name == namelbl {
+		tg.ixname = uint16(i)
 	}
 }
