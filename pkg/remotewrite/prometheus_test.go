@@ -1,6 +1,7 @@
 package remotewrite
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -10,7 +11,11 @@ import (
 	"go.k6.io/k6/metrics"
 )
 
+// TODO: test MapSeries with suffix
+
 func TestMapSeries(t *testing.T) {
+	t.Parallel()
+
 	r := metrics.NewRegistry()
 	series := metrics.TimeSeries{
 		Metric: &metrics.Metric{
@@ -20,7 +25,7 @@ func TestMapSeries(t *testing.T) {
 		Tags: r.RootTagSet().With("tagk1", "tagv1").With("b1", "v1"),
 	}
 
-	lbls := MapSeries(series)
+	lbls := MapSeries(series, "")
 	require.Len(t, lbls, 3)
 
 	exp := []*prompb.Label{
@@ -32,7 +37,7 @@ func TestMapSeries(t *testing.T) {
 }
 
 // buildTimeSeries creates a TimSeries with the given name, value and timestamp
-func buildTimeSeries(name string, value float64, timestamp time.Time) *prompb.TimeSeries {
+func buildTimeSeries(name string, value float64, timestamp time.Time) *prompb.TimeSeries { //nolint:unparam
 	return &prompb.TimeSeries{
 		Labels: []*prompb.Label{
 			{
@@ -57,4 +62,13 @@ func assertTimeSeriesEqual(t *testing.T, expected []*prompb.TimeSeries, actual [
 	for i := 0; i < len(expected); i++ {
 		assert.Equal(t, expected[i], actual[i])
 	}
+}
+
+// sortByLabelName sorts a slice of time series by Name label.
+//
+// TODO: remove the assumption that Name label is the first.
+func sortByNameLabel(s []*prompb.TimeSeries) {
+	sort.Slice(s, func(i, j int) bool {
+		return s[i].Labels[0].Value <= s[j].Labels[0].Value
+	})
 }

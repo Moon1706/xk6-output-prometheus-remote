@@ -1,3 +1,4 @@
+// Package remotewrite registers the xk6-output-prometheus-remote extension
 package remotewrite
 
 import (
@@ -6,7 +7,7 @@ import (
 )
 
 func init() {
-	output.RegisterExtension("output-prometheus-remote", func(p output.Params) (output.Output, error) {
+	output.RegisterExtension("xk6-prometheus-rw", func(p output.Params) (output.Output, error) {
 		return remotewrite.New(p)
 	})
 }
